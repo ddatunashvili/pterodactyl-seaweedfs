@@ -1,0 +1,72 @@
+{
+    "_comment": "DO NOT EDIT: FILE GENERATED AUTOMATICALLY BY PTERODACTYL PANEL - PTERODACTYL.IO",
+    "meta": {
+        "version": "PTDL_v2",
+        "update_url": null
+    },
+    "exported_at": "2026-10-08T00:00:00+00:00",
+    "name": "SeaweedFS (S3 Storage)",
+    "author": "404frieds@gmail.com",
+    "description": "S3-compatible object storage on SeaweedFS. One public port speaks the S3 API; use it with the AWS CLI, rclone, s3cmd, any S3 SDK, or as a backup target. Console input runs as `weed shell` commands.",
+    "features": null,
+    "docker_images": {
+        "SeaweedFS 4.48": "ghcr.io/ddatunashvili/pterodactyl-seaweedfs:latest"
+    },
+    "file_denylist": [],
+    "startup": "weed server -ip=127.0.0.1 -ip.bind=127.0.0.1 -dir=/home/container/data -volume.max=0 -master.volumeSizeLimitMB={{VOLUME_SIZE_MB}} -master.port=19333 -master.port.grpc=29333 -volume.port=18080 -volume.port.grpc=28080 -filer -filer.port=18888 -filer.port.grpc=28888 -s3 -s3.ip.bind=0.0.0.0 -s3.port={{SERVER_PORT}} -s3.port.grpc=18333 -s3.port.iceberg=0 -s3.port.lance=0 -s3.config=/tmp/renode-s3.json",
+    "config": {
+        "files": "{}",
+        "startup": "{\n    \"done\": \"Start Seaweed S3 API Server\"\n}",
+        "logs": "{}",
+        "stop": "^C"
+    },
+    "scripts": {
+        "installation": {
+            "script": "#!/bin/bash\nmkdir -p /mnt/server/data\necho \"Install complete. SeaweedFS creates its volumes and metadata on first start.\"",
+            "container": "ghcr.io/pterodactyl/installers:debian",
+            "entrypoint": "bash"
+        }
+    },
+    "variables": [
+        {
+            "name": "S3 Access Key",
+            "description": "Access key ID for the S3 API. Generated per server.",
+            "env_variable": "S3_ACCESS_KEY",
+            "default_value": "",
+            "user_viewable": true,
+            "user_editable": false,
+            "rules": "required|string|alpha_num|between:16,40",
+            "field_type": "text"
+        },
+        {
+            "name": "S3 Secret Key",
+            "description": "Secret access key for the S3 API. Generated per server.",
+            "env_variable": "S3_SECRET_KEY",
+            "default_value": "",
+            "user_viewable": true,
+            "user_editable": false,
+            "rules": "required|string|alpha_num|between:32,64",
+            "field_type": "text"
+        },
+        {
+            "name": "Bucket",
+            "description": "A bucket created on start if it does not exist. More can be created with any S3 client.",
+            "env_variable": "S3_BUCKET",
+            "default_value": "default",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|string|regex:/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/",
+            "field_type": "text"
+        },
+        {
+            "name": "Volume Size (MB)",
+            "description": "Size at which SeaweedFS closes a volume file and starts a new one. Small keeps small disks usable.",
+            "env_variable": "VOLUME_SIZE_MB",
+            "default_value": "1024",
+            "user_viewable": true,
+            "user_editable": false,
+            "rules": "required|integer|between:100,30000",
+            "field_type": "text"
+        }
+    ]
+}
