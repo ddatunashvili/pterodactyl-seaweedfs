@@ -1,0 +1,119 @@
+name: Build and publish image
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      AK: CiAccessKey0123456789
+      SK: CiSecretKey0123456789abcdefABCDEF0123
+      AWS_DEFAULT_REGION: us-east-1
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/pterodactyl-seaweedfs
+          tags: |
+            type=raw,value=latest
+            type=sha
+
+      - name: Build for test
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: seaweed-test:ci
+
+      # Boot it the way Wings does: its uid, its dropped capabilities,
+      # no-new-privileges, a tty, a tmpfs /tmp, and a startup line prefixed the
+      # way the Renode panel prefixes it. Nothing is pushed unless S3 answers
+      # with the right keys, refuses the wrong ones, and keeps data across a
+      # restart.
+      - name: Boot test
+        run: |
+          set -x
+          mkdir -p /tmp/vol && sudo chown 988:988 /tmp/vol
+          STARTUP=": renode_banner_begin; if [ -n \"\$RENODE_BANNER\" ]; then printf \"%s\" \"\$RENODE_BANNER\" | base64 -d 2>/dev/null || true; fi; : renode_banner_end; $(sed -e 's/{{SERVER_PORT}}/${SERVER_PORT}/' -e 's/{{VOLUME_SIZE_MB}}/${VOLUME_SIZE_MB}/' startup.txt)"
+          echo "$STARTUP"
+          docker run -d -t -i --name ci --user 988:988 \
+            --cap-drop setpcap --cap-drop mknod --cap-drop audit_write --cap-drop net_raw \
+            --cap-drop dac_override --cap-drop fowner --cap-drop fsetid --cap-drop net_bind_service \
+            --cap-drop sys_chroot --cap-drop setfcap --security-opt no-new-privileges \
+            --tmpfs /tmp:rw,exec,uid=988,gid=988 --memory 1024m -v /tmp/vol:/home/container \
+            -p 127.0.0.1:25723:25723 \
+            -e SERVER_PORT=25723 -e VOLUME_SIZE_MB=1024 -e S3_ACCESS_KEY=$AK -e S3_SECRET_KEY=$SK -e S3_BUCKET=ci-bucket \
+            -e RENODE_BANNER="$(printf 'RENODE BANNER OK\n' | base64)" \
+            -e STARTUP="$STARTUP" seaweed-test:ci
+          for i in $(seq 1 60); do
+            docker logs ci 2>&1 | grep -q 'Renode: Created bucket ci-bucket' && break
+            docker inspect -f '{{.State.Running}}' ci | grep -q true || break
+            sleep 2
+          done
+          docker logs ci 2>&1 | tail -60
+          docker logs ci 2>&1 | grep -q 'RENODE BANNER OK'
+          docker logs ci 2>&1 | grep -iE 's3' | head -20
+          docker logs ci 2>&1 | grep -q 'Renode: Created bucket ci-bucket'
+          S3="aws --endpoint-url http://127.0.0.1:25723 s3"
+          AWS_ACCESS_KEY_ID=$AK AWS_SECRET_ACCESS_KEY=$SK $S3 ls | tee /tmp/ls.txt
+          grep -q 'ci-bucket' /tmp/ls.txt
+          echo "hello renode" > /tmp/obj.txt
+          AWS_ACCESS_KEY_ID=$AK AWS_SECRET_ACCESS_KEY=$SK $S3 cp /tmp/obj.txt s3://ci-bucket/obj.txt
+          AWS_ACCESS_KEY_ID=$AK AWS_SECRET_ACCESS_KEY=$SK $S3 cp s3://ci-bucket/obj.txt /tmp/back.txt
+          cmp /tmp/obj.txt /tmp/back.txt
+          if AWS_ACCESS_KEY_ID=$AK AWS_SECRET_ACCESS_KEY=WrongSecret0000000000000000000000 $S3 ls; then echo "wrong key accepted"; exit 1; fi
+          if $S3 ls --no-sign-request; then echo "anonymous accepted"; exit 1; fi
+          docker kill --signal INT ci
+          for i in $(seq 1 30); do docker inspect -f '{{.State.Running}}' ci | grep -q false && break; sleep 1; done
+          docker logs ci 2>&1 | tail -5
+          docker inspect -f 'exit={{.State.ExitCode}} running={{.State.Running}}' ci | tee /tmp/exit.txt
+          grep -q 'running=false' /tmp/exit.txt
+          # Same volume, fresh start: the object is still there.
+          docker start ci
+          for i in $(seq 1 60); do
+            docker logs ci 2>&1 | grep -q 'Renode: Bucket ci-bucket is ready' && break
+            sleep 2
+          done
+          docker logs ci 2>&1 | grep 'Renode:'
+          rm -f /tmp/back.txt
+          AWS_ACCESS_KEY_ID=$AK AWS_SECRET_ACCESS_KEY=$SK $S3 cp s3://ci-bucket/obj.txt /tmp/back.txt
+          cmp /tmp/obj.txt /tmp/back.txt
+          du -sh /tmp/vol/data
+          docker kill --signal INT ci
+
+      # No keys, no server: the container must exit rather than serve S3 with
+      # nothing guarding it.
+      - name: Failure exits
+        run: |
+          mkdir -p /tmp/vol2 && sudo chown 988:988 /tmp/vol2
+          docker run -d -t -i --name bad --user 988:988 --tmpfs /tmp:rw,exec,uid=988,gid=988 -v /tmp/vol2:/home/container \
+            -e S3_ACCESS_KEY= -e S3_SECRET_KEY= -e STARTUP='weed server -dir=/home/container/data -s3' seaweed-test:ci
+          for i in $(seq 1 30); do docker inspect -f '{{.State.Running}}' bad | grep -q false && break; sleep 1; done
+          docker logs bad 2>&1 | tail -5
+          docker inspect -f 'exit={{.State.ExitCode}} running={{.State.Running}}' bad | tee /dev/stderr | grep -q 'exit=1 running=false'
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
